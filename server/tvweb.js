@@ -1198,6 +1198,7 @@ if (CLI_MODE) {
     // left alone: it is installed when a key is set to it.
     tvApp('refresh', function (r) {
       if (r && r.refreshed && r.ok) console.log('inputbar: app refreshed to current release');
+      inputBar.poke();
       // One at a time: the installer takes one job.
       tvApp('refresh', function (r2) {
         if (r2 && r2.refreshed && r2.ok) console.log('homebar: app refreshed to current release');
@@ -2054,6 +2055,7 @@ function startGlasshouseHome() {
       homeWatchesForeground = on;
     },
     pictureDetails: function (on) { homePicture.want('details', on); },
+    onDeviceNames: function () { telemetry.expireInputNames(); },
     handOverTileHiding: function (hide) { appsModule.handOverToHome(hide); }
   });
   homeLauncher.init({ stateDir: __dirname, version: TVWEB_DISPLAY_VERSION });

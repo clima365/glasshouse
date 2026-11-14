@@ -295,13 +295,21 @@ async function visitInputBarBehindHome(browser, base, problems) {
       const url = new URL(route.request().url());
       if (url.pathname === '/assets/devicons.js') return route.continue({ url: base + '/assets/devicons.js' });
       if (url.pathname === '/api/home/now') return route.fulfill({ json: { kind: 'input', port: 2, devices: ['hdmi2'], behindHome } });
-      if (url.pathname === '/api/home/catalogue') return route.fulfill({ json: { ok: true, layout: {}, order: { dev: ['hdmi1', 'hdmi2'] },
-        devices: [{ id: 'hdmi1', name: 'HDMI 1', input: 'hdmi1', port: 1 }, { id: 'hdmi2', name: 'Mac', input: 'hdmi2', port: 2 }] } });
+      if (url.pathname === '/api/home/catalogue') return route.fulfill({ json: { ok: true, layout: behindHome ? {} : { inputBarTransparent: true }, order: { dev: ['TV', 'hdmi1', 'hdmi2'] },
+        devices: [{ id: 'TV', name: 'Live TV', tuner: true }, { id: 'hdmi1', name: 'HDMI 1', input: 'hdmi1', port: 1 }, { id: 'hdmi2', name: 'Mac', input: 'hdmi2', port: 2 }] } });
       return route.fulfill({ json: {} });
     });
     try {
       await page.goto(base + '/assets/inputbar-app/index.html');
       await page.waitForSelector('.tile.focus');
+      if (await page.locator('.tile').count() !== 3 || await page.locator('.tile').first().locator('.nm').textContent() !== 'Live TV') problems.push(name + 'Live TV was not shown');
+      if (await page.locator('.tile').first().locator('.path').count() !== 0) problems.push(name + 'Live TV showed an HDMI path');
+      const visual = await page.evaluate(() => {
+        const unfocused = document.querySelector('.tile:not(.focus)');
+        return { transparent: document.body.classList.contains('transparent'), opacity: unfocused ? getComputedStyle(unfocused).opacity : '' };
+      });
+      if (behindHome && (visual.transparent || visual.opacity !== '1')) problems.push(name + 'default tiles were not opaque (' + JSON.stringify(visual) + ')');
+      if (!behindHome && (!visual.transparent || visual.opacity !== '0.75')) problems.push(name + 'transparent tiles were not enabled (' + JSON.stringify(visual) + ')');
       const focused = await page.textContent('.tile.focus .nm');
       if (focused !== 'Mac') problems.push(name + 'the bar opened on ' + focused + ', not the input last watched');
       await page.keyboard.press('Enter');
@@ -309,9 +317,79 @@ async function visitInputBarBehindHome(browser, base, problems) {
       const launches = await page.evaluate(() => window.launches);
       if (behindHome && launches.indexOf('com.webos.app.hdmi2') === -1) problems.push(name + 'OK on HDMI 2 did not switch to it');
       if (!behindHome && launches.length) problems.push(name + 'OK on the input on screen launched ' + launches.join(', '));
+      if (!behindHome) {
+        await page.goto(base + '/assets/inputbar-app/index.html');
+        await page.waitForSelector('.tile.focus');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(300);
+        const tvLaunches = await page.evaluate(() => window.launches);
+        if (tvLaunches.indexOf('com.webos.app.livetv') === -1) problems.push(name + 'OK on Live TV did not launch livetv');
+      }
     } finally {
       await page.close();
     }
+  }
+  // Six or more inputs stack into two rows and step vertically with Up and Down.
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  page.on('pageerror', e => problems.push('Input bar (two rows): ' + e.message));
+  await page.addInitScript(() => {
+    window.launches = [];
+    window.PalmServiceBridge = function () {};
+    window.PalmServiceBridge.prototype.call = function (uri, body) {
+      window.launches.push({ uri, body: JSON.parse(body) });
+      if (this.onservicecallback) this.onservicecallback(JSON.stringify({ returnValue: true }));
+    };
+    window.close = function () { window.closed = true; };
+  });
+  await page.route('http://localhost:8080/**', route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/assets/devicons.js') return route.continue({ url: base + '/assets/devicons.js' });
+    if (url.pathname === '/api/home/now') return route.fulfill({ json: { kind: 'input', port: 1, devices: ['hdmi1'], behindHome: false } });
+    if (url.pathname === '/api/home/catalogue') {
+      return route.fulfill({
+        json: {
+          ok: true,
+          layout: {},
+          order: { dev: ['TV', 'hdmi1', 'hdmi2', 'dms:sonos', 'airplay', 'allinputs'] },
+          devices: [
+            { id: 'TV', name: 'Live TV', tuner: true },
+            { id: 'hdmi1', name: 'HDMI 1', input: 'hdmi1', port: 1 },
+            { id: 'hdmi2', name: 'Mac', input: 'hdmi2', port: 2 },
+            { id: 'dms:sonos', name: 'Sonos', kind: 'dms', appId: 'com.webos.app.mediadiscovery', deviceId: 'SONOS_1', port: 0 },
+            { id: 'airplay', name: 'AirPlay', kind: 'airplay', appId: 'airplay', port: 0 },
+            { id: 'allinputs', name: 'All Inputs', kind: 'allinputs', appId: 'com.webos.app.homeconnect', port: 0 }
+          ]
+        }
+      });
+    }
+    return route.fulfill({ json: {} });
+  });
+  try {
+    await page.goto(base + '/assets/inputbar-app/index.html');
+    await page.waitForSelector('.tile.focus');
+    const rowState = await page.evaluate(() => ({
+      tworow: document.body.classList.contains('tworow'),
+      breaks: document.querySelectorAll('#tiles br').length,
+      dmsSub: document.querySelectorAll('.tile')[3].querySelector('.path').textContent
+    }));
+    if (!rowState.tworow || rowState.breaks !== 1) problems.push('Input bar: 6 inputs did not switch to two-row layout (' + JSON.stringify(rowState) + ')');
+    if (rowState.dmsSub !== 'Media Server') problems.push('Input bar: media server subtitle was ' + rowState.dmsSub);
+    // Focus starts on HDMI 1 (index 1); Down jumps to AirPlay (index 4), Right moves to All Inputs (index 5).
+    await page.keyboard.press('ArrowDown');
+    const afterDown = await page.textContent('.tile.focus .nm');
+    if (afterDown !== 'AirPlay') problems.push('Input bar: ArrowDown moved to ' + afterDown + ' instead of AirPlay');
+    await page.keyboard.press('ArrowUp');
+    const afterUp = await page.textContent('.tile.focus .nm');
+    if (afterUp !== 'HDMI 1') problems.push('Input bar: ArrowUp moved to ' + afterUp + ' instead of HDMI 1');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    const launches = await page.evaluate(() => window.launches);
+    if (!launches.some(l => l.uri === 'luna://airplay.service/showAirplayPage')) problems.push('Input bar: OK on AirPlay did not call showAirplayPage');
+  } finally {
+    await page.close();
   }
 }
 
@@ -1393,6 +1471,7 @@ async function visitHomeInputsEditor(browser, base, problems) {
   const layout = { rows: ['dev', 'app', 'ch'], order: { app: [], dev: [], ch: [] }, sort: { app: 'custom', dev: 'custom', ch: 'custom' },
     hidden: { app: [], dev: [], ch: [] }, channels: [], hintSeen: true, searchHintSeen: true, hideUnused: false };
   const saves = [];
+  await page.route('**/api/inputs', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, writable: true }) }));
   await page.route('**/api/home**', async route => {
     const pathname = new URL(route.request().url()).pathname;
     let body;
@@ -1410,17 +1489,21 @@ async function visitHomeInputsEditor(browser, base, problems) {
   });
   try {
     await page.goto(base + '/?tab=home');
-    const row = page.locator('details.home-row[data-kind="dev"]');
-    await row.locator('summary').click();
-    await row.locator('.home-tile').first().waitFor();
-    if (await row.locator('button#home-hide-unused.pill').count() !== 1) problems.push('Home inputs editor: the Inputs row has no On and Off switch for inputs with nothing connected');
-    const toggles = await row.locator('.home-tile').getByText(/^(Shown|Hidden)$/).count();
+    await page.locator('.home-row[data-kind="dev"]').waitFor();
+    if (await page.locator('details.home-row[data-kind="dev"]').count()) {
+      problems.push('Home inputs editor: per-input list remained expandable on the Home tab');
+    }
+    await page.goto(base + '/?tab=inputs');
+    const list = page.locator('#inputs-list');
+    await list.locator('.home-tile').first().waitFor();
+    if (await list.locator('button#home-hide-unused.pill').count() !== 1) problems.push('Home inputs editor: the Inputs tab has no On and Off switch for inputs with nothing connected');
+    const toggles = await list.locator('.home-tile').getByText(/^(Shown|Hidden)$/).count();
     if (toggles !== 2) problems.push('Home inputs editor: inputs did not each offer show or hide beside the switch (' + toggles + ')');
-    await row.locator('#home-hide-unused').click();
+    await list.locator('#home-hide-unused').click();
     const until = Date.now() + 5000;
-    while (Date.now() < until && !/Left out/.test(await row.textContent())) await page.waitForTimeout(100);
+    while (Date.now() < until && !/Left out/.test(await list.textContent())) await page.waitForTimeout(100);
     if (!saves.some(p => p.hideUnused === true)) problems.push('Home inputs editor: the switch did not save hideUnused');
-    const out = await row.locator('.home-tile').filter({ hasText: 'HDMI 2' }).getByText('Left out').count();
+    const out = await list.locator('.home-tile').filter({ hasText: 'HDMI 2' }).getByText('Left out').count();
     if (out !== 1) problems.push('Home inputs editor: the input with nothing connected was not marked Left out');
   } finally { await page.close(); }
 }
@@ -2248,6 +2331,7 @@ async function visitHomeAvailability(browser, base, problems) {
     { name: 'LG\'s Home only', st: { available: true, enabled: false, lgHomeAvailable: true, lgHome: lgHome(false), homeAutoLaunch: false }, glasshouse: false },
     { name: 'webOS 10\'s banner', st: { available: true, enabled: false, lgHomeAvailable: true, homeAutoLaunch: false,
       lgHome: lgHome(false, { choice: 'black', own: false, width: 3492, height: 1685 }) }, glasshouse: false, banner: true },
+    { name: 'LG Home on supported TV', st: { available: true, enabled: false, lgHomeAvailable: true, lgHome: lgHome(false), homeAutoLaunch: false }, glasshouse: true },
     { name: 'Glasshouse Home on', st: { available: true, enabled: true, lgHomeAvailable: true, lgHome: lgHome(true) }, glasshouse: true },
     // Keep restartsApps coverage alongside webOS 6 standalone (keeps preview options) and webOS 4 (hides them).
     { name: 'restartsApps', st: { available: true, enabled: true, lgHomeAvailable: true, lgHome: lgHome(true),
@@ -2284,12 +2368,18 @@ async function visitHomeAvailability(browser, base, problems) {
       if (c.glasshouse && await page.locator('#home-restart-note').isVisible() !== restarts) {
         fail('the note that a switch closes apps ' + (restarts ? 'missing' : 'shown on a TV it does not apply to'));
       }
+      if (c.glasshouse && await page.locator('#home-exp').isVisible() !== !!st.enabled) {
+        fail('the experimental note ' + (st.enabled ? 'missing' : 'shown with LG Home selected'));
+      }
+      if (c.glasshouse && !st.enabled && await page.locator('#home-state-desc').isVisible()) {
+        fail('the state description showed with LG Home selected');
+      }
       if (c.previewOptions !== undefined) {
         for (const id of ['#home-preview-sound-row', '#home-preview-always-row', '#home-preview-tile-row']) {
           if (await page.locator(id).isVisible() !== c.previewOptions) fail(id + ' ' + (c.previewOptions ? 'missing' : 'shown'));
         }
       }
-      if (await page.locator('#disc-system-tiles').isVisible() === c.glasshouse) fail('system apps ' + (c.glasshouse ? 'shown with Glasshouse Home on' : 'missing'));
+      if (await page.locator('#disc-system-tiles').isVisible() === !!st.enabled) fail('system apps ' + (st.enabled ? 'shown with Glasshouse Home on' : 'missing'));
       if (st.homeAutoLaunch !== undefined && (!await page.locator('#home-autolaunch').isVisible() || await page.locator('#home-autolaunch').isDisabled()))
         fail('Open Home at power-on missing or unusable');
       if (!c.glasshouse && await page.locator('#home-picture-row').isVisible()) fail('Glasshouse Home\'s options shown without it');
@@ -3238,19 +3328,23 @@ async function visitInputsAndRemote(browser, base, problems) {
   const page = await browser.newPage();
   const fail = message => problems.push('Inputs and Remote: ' + message);
   page.on('pageerror', error => fail(error.message));
-  const noSignal = { ok: true, available: true, on: false, applied: false, restartPending: false };
-  const layout = { hidden: { dev: [] }, hideUnused: false };
+  const noSignal = { ok: true, available: true, on: false, mode: 'lg', applied: false, restartPending: false };
+  const layout = { hidden: { dev: [] }, hideUnused: false, deviceNames: {} };
+  const devices = [{ id: 'TV', name: 'Live TV', tuner: true }, { id: 'HDMI_1', name: 'Console', port: 1 }, { id: 'HDMI_2', name: 'HDMI 2', port: 2, unused: true }];
   const keys = [{ key: 'input', title: 'Input', action: 'lg' }, { key: 'netflix', title: 'Netflix', action: 'open', id: 'com.tvweb.inputbar', opens: 'Input bar' }];
   let hasKeys = true;
   const writes = [];
   try {
     await page.route('**/api/inputs', route => route.fulfill({ json: { ok: true, writable: true, noSignal, inputBar: { standing: 'tried', allowed: true, experimental: false } } }));
-    await page.route('**/api/home/catalogue', route => route.fulfill({ json: { ok: true, layout, order: { dev: ['HDMI_1', 'HDMI_2'] },
-      devices: [{ id: 'HDMI_1', name: 'Console', port: 1 }, { id: 'HDMI_2', name: 'HDMI 2', port: 2, unused: true }] } }));
+    await page.route('**/api/home/catalogue', route => route.fulfill({ json: { ok: true, layout, order: { dev: ['TV', 'HDMI_1', 'HDMI_2'] },
+      devices: devices.map(d => layout.deviceNames[d.id] ? Object.assign({}, d, { name: layout.deviceNames[d.id], defaultName: d.name }) : d) } }));
     await page.route('**/api/home/layout', async route => {
       const patch = route.request().postDataJSON();
       writes.push(patch);
       if (patch.hidden) layout.hidden = patch.hidden;
+      if (typeof patch.hideUnused === 'boolean') layout.hideUnused = patch.hideUnused;
+      if (typeof patch.inputBarTransparent === 'boolean') layout.inputBarTransparent = patch.inputBarTransparent;
+      if (patch.deviceNames) Object.assign(layout.deviceNames, patch.deviceNames);
       await route.fulfill({ json: { ok: true } });
     });
     await page.route('**/api/apps', async route => {
@@ -3264,6 +3358,7 @@ async function visitInputsAndRemote(browser, base, problems) {
       } catch (e) { /* closed */ }
     });
     await page.route('**/api/remotekeys', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
       const set = route.request().postDataJSON();
       writes.push(set);
       keys[0] = set.action === 'lg' ? { key: 'input', title: 'Input', action: 'lg' }
@@ -3273,37 +3368,60 @@ async function visitInputsAndRemote(browser, base, problems) {
     await page.route('**/api/control', async route => {
       const command = route.request().postDataJSON();
       writes.push(command);
-      if (command.action === 'plainNoSignal') noSignal.on = command.value;
+      if (command.action === 'plainNoSignal') {
+        noSignal.mode = command.value === 'icon' ? 'icon' : (command.value === 'plain' || command.value === true ? 'plain' : 'lg');
+        noSignal.on = noSignal.mode !== 'lg';
+      }
       await route.fulfill({ json: Object.assign({ ok: true }, noSignal) });
     });
     await page.goto(base + '/?tab=inputs');
-    await page.locator('#inputs-list .prot-row').first().waitFor();
-    if (await page.locator('#inputs-list .prot-row').count() !== 3) fail('the inputs and their switch are not listed');
+    await page.locator('#inputs-list .home-tile').first().waitFor();
+    if (await page.locator('#inputs-list .home-tile').count() !== 3) fail('the inputs are not listed');
+    if (await page.locator('#inputs-list .home-tile .inp-ico svg').count() !== 3) fail('input cards have no device icons');
+    if (await page.locator('#inputs-list .home-tile').first().locator('.inp-status').count() !== 0) fail('Live TV card showed a connection status');
+    if (!await page.locator('#inputs-sort').isVisible() || !await page.locator('#home-hide-unused').isVisible()) fail('the input list options are missing');
     await page.locator('#inputs-list [data-dev="HDMI_2"]').click();
     await page.locator('#inputs-list [data-dev="HDMI_2"].idle').waitFor();
     if (JSON.stringify(writes[0]) !== JSON.stringify({ hidden: { dev: ['HDMI_2'] } })) fail('hiding an input did not save it');
-    // The Input key: LG's list or the bar, chosen here; another key that opens it is named.
-    await page.locator('#inputs-bar-lg.good').waitFor();
-    if (!/Netflix/.test(await page.locator('#inputs-bar-note').textContent())) fail('another key that opens the input bar is not named');
+    // Editing an HDMI input's name directly on its card.
+    const nameIn = page.locator('#inputs-list [data-dev-name="HDMI_1"]');
+    await nameIn.fill('Living Room');
+    await nameIn.press('Enter');
+    await page.waitForFunction(() => {
+      const inp = document.querySelector('#inputs-list [data-dev-name="HDMI_1"]');
+      const port = inp && inp.parentElement && inp.parentElement.querySelector('.inp-port');
+      return inp && inp.value === 'Living Room' && inp.getAttribute('data-cur') === 'Living Room' && port && port.textContent === 'HDMI 1';
+    });
+    if (JSON.stringify(writes[writes.length - 1]) !== JSON.stringify({ deviceNames: { HDMI_1: 'Living Room' } })) fail('renaming an input did not save deviceNames');
+    // The Input key: LG's list or the bar, chosen here.
+    await page.locator('#inputs-bar-lg.on').waitFor();
     await page.locator('#inputs-bar-ours').click();
-    await page.locator('#inputs-bar-ours.good').waitFor();
+    await page.locator('#inputs-bar-ours.on').waitFor();
     if (JSON.stringify(writes[writes.length - 1]) !== JSON.stringify({ key: 'input', action: 'open', id: 'com.tvweb.inputbar' })) fail('choosing the input bar did not set the Input key');
     await page.locator('#inputs-bar-lg').click();
-    await page.locator('#inputs-bar-lg.good').waitFor();
+    await page.locator('#inputs-bar-lg.on').waitFor();
     if (writes[writes.length - 1].action !== 'lg') fail('choosing LG\'s list did not put the Input key back');
-    await page.locator('#inputs-nosignal-btn').click();
-    await page.locator('#inputs-nosignal-btn.good').waitFor();
-    if (writes[writes.length - 1].action !== 'plainNoSignal' || writes[writes.length - 1].value !== true) fail('the No Signal switch did not send it');
-    await page.locator('#inputs-grp-bar button', { hasText: 'Remote keys' }).click();
-    if (await page.evaluate(() => activeTab) !== 'remote') fail('the input bar\'s button did not open Remote');
+    await page.locator('#inputs-bar-transparent').click();
+    await page.locator('#inputs-bar-transparent.good').waitFor();
+    if (JSON.stringify(writes[writes.length - 1]) !== JSON.stringify({ inputBarTransparent: true })) fail('the Transparent tiles switch did not save inputBarTransparent');
+    await page.locator('#inputs-nosignal-lg.on').waitFor();
+    await page.locator('#inputs-nosignal-plain').click();
+    await page.locator('#inputs-nosignal-plain.on').waitFor();
+    if (writes[writes.length - 1].action !== 'plainNoSignal' || writes[writes.length - 1].value !== 'plain') fail('the No Signal card did not send plain');
+    await page.locator('#inputs-nosignal-icon').click();
+    await page.locator('#inputs-nosignal-icon.on').waitFor();
+    if (writes[writes.length - 1].action !== 'plainNoSignal' || writes[writes.length - 1].value !== 'icon') fail('the No Signal icon card did not send icon');
+    await page.locator('#tab-btn-remote').click();
+    if (await page.evaluate(() => activeTab) !== 'remote') fail('the Remote tab button did not open Remote');
     if (!await page.locator('#remotepane #disc-remotekeys').isVisible()) fail('Remote keys are not on the Remote tab');
     if (await page.locator('#appspane #disc-remotekeys, #sspane [id*="nosignal"]').count()) fail('remote keys or No Signal remain on their old tabs');
-    // A TV with no keys to set: no Remote tab, and no input bar on Inputs.
+    // A TV with no keys to set: no Remote tab, no input bar on Inputs, and no Your inputs while LG Home is active.
     hasKeys = false;
     await page.goto(base + '/?tab=inputs');
-    await page.locator('#inputs-list .prot-row').first().waitFor();
+    await page.locator('#inputs-nosignal-icon.on').waitFor();
     await page.locator('#tab-btn-remote').waitFor({ state: 'hidden' });
     if (await page.locator('#inputs-grp-bar').isVisible()) fail('the input bar is offered with no keys to open it');
+    if (await page.locator('#inputs-grp-list').isVisible()) fail('Your inputs is shown with neither the input bar nor a Glasshouse launcher active');
   } catch (e) {
     fail(e.message);
   } finally {

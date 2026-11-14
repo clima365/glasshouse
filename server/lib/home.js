@@ -255,6 +255,8 @@ var systemctlPath = '';
 var homeKeysFn = function () {};
 /** @type {(hide: (ids: string[]) => void) => void} */
 var handOverFn = function () {};
+/** @type {function(): void} */
+var onDeviceNamesFn = function () {};
 // Told whether the plate's picture details are on, at start and on each change.
 /** @type {function(boolean): void} */
 var pictureDetailsFn = function () {};
@@ -478,6 +480,14 @@ function defaults() {
     // Inputs with nothing plugged in left out of the Inputs row, rather than
     // shown greyed out.
     hideUnused: false,
+    // Discovered DLNA media servers shown alongside inputs; off by default so
+    // speakers and network devices do not clutter the list unless wanted.
+    showMediaServers: false,
+    // Custom names keyed by device id (e.g. 'hdmi2:apple-tv' or 'hdmi1').
+    deviceNames: {},
+    // Transparent tiles on the Glasshouse Input bar: off by default so stepping
+    // through inputs does not repaint translucent tiles over the picture.
+    inputBarTransparent: false,
     // How strongly the wallpaper is darkened behind the text and rows, in
     // percent of the view's own darkening; 0 leaves the picture as it is.
     darkening: 100,
@@ -567,6 +577,9 @@ function normalise(raw) {
   MOTION_KEYS.forEach(function (k) { d[k] = raw[k] !== false; });
   d.darkening = validDarkening(raw.darkening);
   d.hideUnused = raw.hideUnused === true;
+  d.showMediaServers = raw.showMediaServers === true;
+  d.deviceNames = validDeviceNames(raw.deviceNames);
+  d.inputBarTransparent = raw.inputBarTransparent === true;
   // null, saved, is the view's own look; none saved keeps the default.
   if (Object.prototype.hasOwnProperty.call(raw, 'colours')) d.colours = validColours(raw.colours);
   if (typeof raw.hideLgHomeAtStart === 'boolean') d.hideLgHomeAtStart = raw.hideLgHomeAtStart;
@@ -586,6 +599,29 @@ function validColours(v) {
   if (!v || typeof v.text !== 'string' || typeof v.accent !== 'string') return null;
   var text = v.text.toLowerCase(), accent = v.accent.toLowerCase();
   return COLOUR_RE.test(text) && COLOUR_RE.test(accent) ? { text: text, accent: accent } : null;
+}
+
+function validDeviceNames(v, base) {
+  var out = {};
+  if (base && typeof base === 'object') {
+    Object.keys(base).forEach(function (k) { out[k] = base[k]; });
+  }
+  if (!v || typeof v !== 'object' || isArray(v)) return out;
+  Object.keys(v).forEach(function (k) {
+    if (typeof k !== 'string' || !k || k.length > 200) return;
+    var val = v[k];
+    if (val === null || val === '') {
+      delete out[k];
+      return;
+    }
+    if (typeof val !== 'string') return;
+    val = val.replace(/\s+/g, ' ').trim();
+    if (!val) delete out[k];
+    else if (Object.keys(out).length < 32 || Object.prototype.hasOwnProperty.call(out, k)) {
+      out[k] = val.slice(0, 60);
+    }
+  });
+  return out;
 }
 
 function validSnapshot(s) {
@@ -727,6 +763,9 @@ function setLayout(body, cb) {
     slidePanels: typeof body.slidePanels === 'boolean' ? body.slidePanels : c.slidePanels,
     darkening: body.darkening !== undefined ? body.darkening : c.darkening,
     hideUnused: typeof body.hideUnused === 'boolean' ? body.hideUnused : c.hideUnused,
+    showMediaServers: typeof body.showMediaServers === 'boolean' ? body.showMediaServers : c.showMediaServers,
+    deviceNames: body.deviceNames !== undefined ? validDeviceNames(body.deviceNames, c.deviceNames) : c.deviceNames,
+    inputBarTransparent: typeof body.inputBarTransparent === 'boolean' ? body.inputBarTransparent : c.inputBarTransparent,
     // null puts the view's own colours back.
     colours: body.colours !== undefined ? body.colours : c.colours
   });
@@ -747,6 +786,7 @@ function setLayout(body, cb) {
     return cb({ ok: false, error: msg('srv.home.saveFailed', 'could not save the layout') });
   }
   if (c.picture !== config.picture) pictureDetailsFn(config.picture);
+  if (JSON.stringify(c.deviceNames) !== JSON.stringify(config.deviceNames)) onDeviceNamesFn();
   if (config.weather === 'internet') setTimeout(internetWeatherTick, 0);
   // A row back in its own order keeps no record of what was opened.
   ROWS.forEach(function (r) { if (config.sort[r] !== 'recent') recent.forget(r); });
@@ -758,7 +798,7 @@ function layoutOf(c) {
     excludedRecents: c.excludedRecents,
     searchHintSeen: c.searchHintSeen, picture: c.picture, livePreview: c.livePreview, search: c.search, recommended: c.recommended,
     fade: c.fade, wallDrift: c.wallDrift, wallCrossfade: c.wallCrossfade, smoothScroll: c.smoothScroll, slidePanels: c.slidePanels,
-    darkening: c.darkening, hideUnused: c.hideUnused, showClock: c.showClock, rowsBottom: c.rowsBottom, view: c.view,
+    darkening: c.darkening, hideUnused: c.hideUnused, showMediaServers: c.showMediaServers, deviceNames: c.deviceNames, inputBarTransparent: c.inputBarTransparent, showClock: c.showClock, rowsBottom: c.rowsBottom, view: c.view,
     showLastOn: c.showLastOn, showAppCount: c.showAppCount, showCec: c.showCec, showTvLogos: c.showTvLogos, showPointer: c.showPointer, weather: c.weather, weatherPlace: c.weatherPlace, previewAlways: c.previewAlways, previewInTile: c.previewInTile, previewSize: c.previewSize, previewSound: c.previewSound, wallAnim: c.wallAnim,
     animTheme: c.animTheme, animSky: c.animSky, animLight: c.animLight, animThemes: ANIM_THEMES,
     wallShuffleMinutes: c.wallShuffleMinutes, shuffleMinutes: SHUFFLE_MINUTES, colours: c.colours,
@@ -917,13 +957,121 @@ function pluggedPorts(devs, cb) {
   });
 }
 
+function namedDevices(c, list) {
+  var custom = (c && c.deviceNames) || {};
+  var byPortDefault = {};
+  list.forEach(function (d) {
+    if (d.id && d.port && custom[d.id] && d.name) byPortDefault[d.port + ':' + d.name] = custom[d.id];
+  });
+  return list.map(function (d) {
+    var customName = custom[d.id];
+    var renamed = !!(customName && customName !== d.name);
+    var via = d.via && byPortDefault[d.port + ':' + d.via] ? byPortDefault[d.port + ':' + d.via] : d.via;
+    if (!renamed && via === d.via) return d;
+    var copy = {
+      id: d.id,
+      name: renamed ? customName : d.name,
+      input: d.input,
+      port: d.port,
+      via: via,
+      address: d.address
+    };
+    if (renamed) copy.defaultName = d.name;
+    if (d.unused) copy.unused = true;
+    if (d.uniqueId !== undefined) copy.uniqueId = d.uniqueId;
+    if (d.kind) copy.kind = d.kind;
+    if (d.appId) copy.appId = d.appId;
+    if (d.deviceId) copy.deviceId = d.deviceId;
+    return copy;
+  });
+}
+
+function portName(key, d) {
+  var custom = readConfig().deviceNames;
+  if (!custom || !key) return null;
+  if (custom[key]) return custom[key];
+  var subs = d && isArray(d.subList) ? d.subList.filter(function (s) {
+    return s && s.id === 'SIMPLINK' && typeof s.osdName === 'string' && s.osdName.trim();
+  }) : [];
+  if (subs.length === 1) {
+    var devId = key + ':' + slug(subs[0].osdName.replace(/\s+/g, ' ').trim());
+    if (custom[devId]) return custom[devId];
+  }
+  return null;
+}
+
+function appInfo(id, cb) {
+  luna('com.webos.applicationManager/getAppInfo', { id: id }, function (r) {
+    cb(r && r.returnValue && r.appInfo && r.appInfo.id === id ? r.appInfo : null);
+  });
+}
+
+function firstAppInfo(ids, cb) {
+  var i = 0;
+  (function next() {
+    if (i >= ids.length) return cb(null);
+    appInfo(ids[i++], function (info) {
+      if (info) return cb(info);
+      next();
+    });
+  })();
+}
+
+var SKIP_DMS_MODELS = ['LG TV Plus ContentDirectory service', 'LG ThinQ ContentDirectory service'];
+
+function extraDevices(cb) {
+  luna('com.webos.service.attachedstoragemanager/listDevices', { deviceType: ['usb', 'dms'] }, function (r) {
+    var raw = (r && isArray(r.devices) ? r.devices : []).filter(function (d) {
+      return d && (d.deviceType === 'usb' || d.deviceType === 'dms') && typeof d.deviceId === 'string' && d.deviceId &&
+        SKIP_DMS_MODELS.indexOf(d.modelDescription) === -1;
+    });
+    var needMedia = raw.length > 0;
+    firstAppInfo(needMedia ? ['com.webos.app.mediadiscovery', 'com.webos.app.photovideo'] : [], function (mediaInfo) {
+      var mediaApp = (mediaInfo && mediaInfo.id) || 'com.webos.app.mediadiscovery';
+      var out = raw.map(function (d) {
+        var kind = d.deviceType;
+        var label = String(d.deviceName || d.modelDescription || (kind === 'usb' ? 'USB' : 'Media Server')).replace(/\s+/g, ' ').trim();
+        return {
+          id: kind + ':' + slug(d.deviceId),
+          name: label,
+          input: kind,
+          kind: kind,
+          deviceId: d.deviceId,
+          appId: mediaApp,
+          port: 0,
+          via: null,
+          address: typeof d.ipAddress === 'string' && d.ipAddress ? d.ipAddress : null
+        };
+      });
+      appInfo(AIRPLAY_APP, function (ap) {
+        if (ap) out.push({ id: 'airplay', name: 'AirPlay', input: 'airplay', kind: 'airplay', appId: AIRPLAY_APP, port: 0, via: null, address: null });
+        appInfo('com.webos.app.miracast', function (mc) {
+          if (mc) out.push({ id: 'screenshare', name: String(mc.title || 'Screen Share'), input: 'screenshare', kind: 'screenshare', appId: 'com.webos.app.miracast', port: 0, via: null, address: null });
+          firstAppInfo(['com.webos.app.homeconnect', 'com.webos.app.inputmgr'], function (hub) {
+            if (hub) out.push({ id: 'allinputs', name: 'All Inputs', input: 'allinputs', kind: 'allinputs', appId: hub.id, port: 0, via: null, address: null });
+            cb(out);
+          });
+        });
+      });
+    });
+  });
+}
+
 function devices(cb) {
   cached('dev', LIST_TTL_MS, function (done) {
     luna('com.webos.service.eim/getAllInputStatus', {}, function (r) {
       if (!r || !isArray(r.devices)) return done(null);
-      pluggedPorts(r.devices, function (portsPlugged) { done(listDevices(r.devices, portsPlugged)); });
+      pluggedPorts(r.devices, function (portsPlugged) {
+        var hdmi = listDevices(r.devices, portsPlugged);
+        extraDevices(function (extra) { done(hdmi.concat(extra)); });
+      });
     });
-  }, cb);
+  }, function (list) {
+    if (!list) return cb(null);
+    var c = readConfig();
+    if (!c.showMediaServers) list = list.filter(function (d) { return d.kind !== 'dms'; });
+    cb(namedDevices(c, list));
+  });
 }
 
 function listDevices(devs, portsPlugged) {
@@ -1380,15 +1528,16 @@ function now(cb) {
     });
   }
   if (id === LIVE_TV) {
+    var behind = foreground === HOME_APP || foreground === LG_HOME;
     return luna('com.webos.service.utp.boot/getLastChannelId', {}, function (r) {
       var chId = r && typeof r.channelId === 'string' ? r.channelId : null;
       channelList(function (chans) {
         /** @type {any} */
         var hit = null;
         (chans || []).forEach(function (c) { if (c.id === chId) hit = c; });
-        if (!hit) return cb({ kind: 'channel', appId: id, since: lastSource.at, channel: null });
+        if (!hit) return cb({ kind: 'channel', appId: id, since: lastSource.at, behindHome: behind, channel: null });
         luna('com.webos.service.apiadapter/tv/getChannelCurrentProgramInfo', { channelId: hit.id }, function (p) {
-          cb({ kind: 'channel', appId: id, since: lastSource.at, channel: hit, programme: programme(p) });
+          cb({ kind: 'channel', appId: id, since: lastSource.at, behindHome: behind, channel: hit, programme: programme(p) });
         });
       });
     });
@@ -1466,6 +1615,8 @@ function open(body, cb) {
       var hit = null;
       (devs || []).forEach(function (d) { if (d.id === id) hit = d; });
       if (!hit) return cb({ ok: false, error: msg('srv.home.unknownTile', 'that is not on Glasshouse Home') });
+      if (hit.kind === 'airplay') return openAirPlay(opened('dev', hit.id, cb));
+      if (hit.appId) return launch(hit.appId, hit.deviceId ? { requestDevice: hit.deviceId } : null, opened('dev', hit.id, cb));
       var input = { app: names.inputAppId(hit.input), at: nowMs() };
       tileInput = input;
       // LG's picker selects the source behind a receiver through this launch parameter.
@@ -2882,6 +3033,7 @@ function init(opts) {
   homeKeysFn = opts.homeKeys || function () {};
   handOverFn = opts.handOverTileHiding || function () {};
   pictureDetailsFn = opts.pictureDetails || function () {};
+  onDeviceNamesFn = opts.onDeviceNames || function () {};
   setHomeKeyFn = opts.setHomeKey || function (id, cb) { cb({ ok: true, none: true }); };
   readsHomeKeyFn = opts.readsHomeKey || function () { return false; };
   holdMs = opts.holdMs || HOLD_MS;
@@ -3139,6 +3291,7 @@ module.exports = {
   layout: function () { return layoutOf(readConfig()); },
   programme: programme,
   enabled: function () { return readConfig().enabled; },
+  portName: portName,
   refreshApp: refreshApp,
   autoLaunchHeld: autoLaunchHeld,
   setAutoLaunch: setAutoLaunch,

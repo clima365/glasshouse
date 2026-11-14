@@ -189,6 +189,8 @@ function luna(uri, p, cb) {
       // As a C2 (webOS 9.2.2) has it: no launch point, visible false.
       r.appInfo = { id: p.id, title: 'AirPlay', icon: 'AirPlay_Icon-77x77.png', mediumLargeIcon: 'AirPlay_Icon-115x115.png',
                     visible: false, folderPath: '/usr/palm/applications/airplay' };
+    } else if (tv.extraInputApps && tv.extraInputApps[p.id]) {
+      r.appInfo = tv.extraInputApps[p.id];
     }
     else if (!tv.oldAppInstalled) r = { returnValue: false, errorText: 'Invalid appId specified' };
   } else if (uri === 'com.palm.webappmanager/killApp') {
@@ -246,6 +248,8 @@ function luna(uri, p, cb) {
     if (tv.windows) r.windows = copy(tv.windows);
   } else if (uri === 'com.webos.service.utp.boot/getLastChannelId') {
     r.channelId = tv.lastChannel;
+  } else if (uri === 'com.webos.service.attachedstoragemanager/listDevices') {
+    if (tv.attachedDevices) r.devices = copy(tv.attachedDevices);
   }
   process.nextTick(function () { cb(r); });
 }
@@ -3253,6 +3257,102 @@ step('an app opened from the view has time to start before the hidden view count
             wait(45000, function () {
               assert.ok(tv.launched.length > 0, 'past the grace, a view that stays silent is opened again');
               home.disable(function () { done(); });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+step('custom HDMI input names apply to catalogue, now and portName, and clear on empty string', function (done) {
+  var notified = 0;
+  start(null, { onDeviceNames: function () { notified++; } });
+  tv.devices = [
+    { id: 'HDMI_1', label: 'HDMI 1', connected: true, hdmiPlugIn: false },
+    { id: 'HDMI_2', label: 'STEREO 70s', connected: true, hdmiPlugIn: true, lastUniqueId: 8, subList: [
+      { id: 'SIMPLINK', depth: 1, physicalAddress: 8192, uniqueId: 5, osdName: 'STEREO 70s' },
+      { id: 'SIMPLINK', depth: 2, physicalAddress: 9216, uniqueId: 8, osdName: 'PlayStation 5' }
+    ] },
+    { id: 'HDMI_3', label: 'Apple TV', connected: true, hdmiPlugIn: true, subList: [
+      { id: 'SIMPLINK', depth: 1, uniqueId: 4, osdName: 'Apple TV' }
+    ] }
+  ];
+  foreground('com.webos.app.hdmi2');
+  home.setLayout({ deviceNames: { 'hdmi2:stereo-70s': 'AVR', 'hdmi2:playstation-5': 'Living Room PS5', 'hdmi3:apple-tv': 'Stream Box' } }, function (r) {
+    assert.ok(r.ok, r.error);
+    assert.strictEqual(notified, 1, 'notified on change');
+    assert.deepEqual(r.layout.deviceNames, { 'hdmi2:stereo-70s': 'AVR', 'hdmi2:playstation-5': 'Living Room PS5', 'hdmi3:apple-tv': 'Stream Box' });
+    assert.strictEqual(home.portName('hdmi3', tv.devices[2]), 'Stream Box', 'single SIMPLINK device renames the port');
+    assert.strictEqual(home.portName('hdmi2', tv.devices[1]), null, 'multi-device port keeps its own name');
+    home.catalogue(function (c) {
+      var byId = {};
+      c.devices.forEach(function (d) { byId[d.id] = d; });
+      assert.strictEqual(byId['hdmi2:playstation-5'].name, 'Living Room PS5');
+      assert.strictEqual(byId['hdmi2:playstation-5'].defaultName, 'PlayStation 5');
+      assert.strictEqual(byId['hdmi2:playstation-5'].via, 'AVR', 'parent receiver rename carries into via');
+      home.now(function (n) {
+        assert.strictEqual(n.title, 'Living Room PS5');
+        assert.strictEqual(n.via, 'AVR');
+        home.setLayout({ deviceNames: { 'hdmi2:playstation-5': '' } }, function (r2) {
+          assert.ok(r2.ok);
+          assert.strictEqual(notified, 2);
+          assert.strictEqual(r2.layout.deviceNames['hdmi2:playstation-5'], undefined, 'empty string removes override');
+          home.catalogue(function (c2) {
+            var ps5 = c2.devices.filter(function (d) { return d.id === 'hdmi2:playstation-5'; })[0];
+            assert.strictEqual(ps5.name, 'PlayStation 5');
+            assert.strictEqual(ps5.defaultName, undefined);
+            done();
+          });
+        });
+      });
+    });
+  });
+});
+
+step('media servers, USB drives, AirPlay, Screen Share and All Inputs appear in inputs, rename and open', function (done) {
+  start(null);
+  tv.airplay = true;
+  tv.extraInputApps = {
+    'com.webos.app.photovideo': { id: 'com.webos.app.photovideo', title: 'Photo & Video' },
+    'com.webos.app.miracast': { id: 'com.webos.app.miracast', title: 'Screen Share' },
+    'com.webos.app.inputmgr': { id: 'com.webos.app.inputmgr', title: 'Input Hub' }
+  };
+  tv.attachedDevices = [
+    { deviceId: 'RINCON_MS', deviceName: 'Sonos Media Server', modelDescription: 'Sonos Media Server', ipAddress: '192.168.1.129', deviceType: 'dms' },
+    { deviceId: 'LG_SKIP', deviceName: 'Phone', modelDescription: 'LG ThinQ ContentDirectory service', deviceType: 'dms' },
+    { deviceId: 'USB1', deviceName: 'SanDisk USB', deviceType: 'usb' }
+  ];
+  home.setLayout({ deviceNames: { 'dms:rincon-ms': 'Sonos Era 300' } }, function (lr) {
+    assert.ok(lr.ok);
+    home.catalogue(function (c0) {
+      var byId0 = {};
+      c0.devices.forEach(function (d) { byId0[d.id] = d; });
+      assert.strictEqual(byId0['dms:rincon-ms'], undefined, 'media servers are hidden by default');
+      assert.strictEqual(byId0['usb:usb1'].kind, 'usb');
+      assert.strictEqual(byId0['airplay'].kind, 'airplay');
+      assert.strictEqual(byId0['screenshare'].appId, 'com.webos.app.miracast');
+      assert.strictEqual(byId0['allinputs'].appId, 'com.webos.app.inputmgr');
+      home.setLayout({ showMediaServers: true }, function (lr2) {
+        assert.ok(lr2.ok);
+        home.catalogue(function (c) {
+          var byId = {};
+          c.devices.forEach(function (d) { byId[d.id] = d; });
+          assert.strictEqual(byId['dms:lg-skip'], undefined, 'LG ThinQ DMS is filtered out');
+          assert.strictEqual(byId['dms:rincon-ms'].name, 'Sonos Era 300');
+          assert.strictEqual(byId['dms:rincon-ms'].defaultName, 'Sonos Media Server');
+          assert.strictEqual(byId['dms:rincon-ms'].appId, 'com.webos.app.photovideo');
+          home.open({ kind: 'dev', id: 'dms:rincon-ms' }, function (r1) {
+            assert.ok(r1.ok);
+            assert.deepEqual(tv.launches.pop(), { id: 'com.webos.app.photovideo', params: { requestDevice: 'RINCON_MS' } });
+            home.open({ kind: 'dev', id: 'airplay' }, function (r2) {
+              assert.ok(r2.ok);
+              assert.deepEqual(tv.order.slice(-1), ['airplay page']);
+              home.open({ kind: 'dev', id: 'allinputs' }, function (r3) {
+                assert.ok(r3.ok);
+                assert.deepEqual(tv.launches.pop(), { id: 'com.webos.app.inputmgr' });
+                done();
+              });
             });
           });
         });
