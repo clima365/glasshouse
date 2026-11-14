@@ -577,6 +577,51 @@ step('a port that gains a CEC device redraws the view, and its old tile still op
   });
 });
 
+// A console that drops off the TV's CEC list when off is hdmi4 one moment and
+// hdmi4:xbox the next: its hiding, place and name go with it (#1462).
+step('an input keeps its hiding, place and name whether the TV lists its device or not', function (done) {
+  var now = 1000;
+  var plain = [{ id: 'HDMI_1', label: 'HDMI 1', hdmiPlugIn: true, subList: [] },
+               { id: 'HDMI_4', label: 'XBOX Game Console', hdmiPlugIn: true, subList: [] }];
+  var listed = [{ id: 'HDMI_1', label: 'HDMI 1', hdmiPlugIn: true, subList: [] },
+                { id: 'HDMI_4', label: 'XBOX Game Console', hdmiPlugIn: true,
+                  subList: [{ id: 'SIMPLINK', depth: 1, osdName: 'XBOX', uniqueId: 4 }] }];
+  // Saved while the console was not listed.
+  start({ order: { app: [], dev: ['hdmi4', 'hdmi1'], ch: [] }, hidden: { app: [], dev: ['hdmi4'], ch: [] },
+          deviceNames: { hdmi4: 'Games' } }, { now: function () { return now; } });
+  tv.devices = listed;
+  home.catalogue(function (c) {
+    assert.deepEqual(c.order.dev, ['hdmi4:xbox', 'hdmi1'], 'it keeps its place');
+    var xbox = c.devices.filter(function (d) { return d.id === 'hdmi4:xbox'; })[0];
+    assert.strictEqual(xbox.name, 'Games', 'and its name');
+    var layout = home.layout();
+    assert.deepEqual(layout.hidden.dev, ['hdmi4:xbox'], 'and stays hidden');
+    // Renamed while listed: the new name, not the old, once it drops off again.
+    home.setLayout({ deviceNames: { 'hdmi4:xbox': 'Xbox One' } }, function (saved) {
+      assert.ok(saved.ok, saved.error);
+      assert.deepEqual(home.layout().deviceNames, { 'hdmi4:xbox': 'Xbox One' }, 'the port\'s old name is replaced');
+    assert.deepEqual(layout.order.dev, ['hdmi4:xbox', 'hdmi1']);
+    // Off the list again, the port's tile has them back.
+    tv.devices = plain;
+    now += 60000;
+    home.catalogue(function (back) {
+      assert.deepEqual(back.order.dev, ['hdmi4', 'hdmi1']);
+      assert.deepEqual(home.layout().hidden.dev, ['hdmi4']);
+      assert.strictEqual(back.devices.filter(function (d) { return d.id === 'hdmi4'; })[0].name, 'Xbox One', 'with its new name');
+      // With two devices on the port, each keeps only its own.
+      tv.devices = [{ id: 'HDMI_4', label: 'AV', hdmiPlugIn: true, subList: [
+        { id: 'SIMPLINK', depth: 1, osdName: 'Receiver', uniqueId: 5 },
+        { id: 'SIMPLINK', depth: 2, osdName: 'XBOX', uniqueId: 4 }] }];
+      now += 60000;
+      home.catalogue(function () {
+        assert.deepEqual(home.layout().hidden.dev, ['hdmi4'], 'neither device takes the port\'s hiding');
+        done();
+      });
+    });
+    });
+  });
+});
+
 step('opening an unstarred Internet TV channel accepts the lineup and refuses an unknown channel', function (done) {
   start(null, { iptv: {
     rowItems: function () { return []; },
