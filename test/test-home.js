@@ -23,6 +23,7 @@ var assert = require('assert');
 var fs = require('fs');
 var os = require('os');
 var path = require('path');
+var compat = require('../server/lib/compat');
 var home = require('../server/lib/home');
 
 console.log('Running test-home.js ...');
@@ -1478,9 +1479,19 @@ step('webOS 7, which has no defaultApps setting, still starts: it takes the plac
   });
 });
 
-step('switched on where it is not offered, as after a firmware update to webOS 12, it is switched off at start', function (done) {
-  start({ enabled: true }, { webosVersion: '12.0.0' });
+// No version is known not to run Glasshouse Home; these give lib/compat a
+// limit for the steps that need one, and take it away again.
+function homeLimit(from) {
+  compat.FEATURES.home.from = from;
+  compat.FEATURES.home.tooOld = function () { return 'Glasshouse Home needs webOS ' + from + ' or later.'; };
+}
+function noHomeLimit() { delete compat.FEATURES.home.from; delete compat.FEATURES.home.tooOld; }
+
+step('switched on where it is not offered, it is switched off at start', function (done) {
+  homeLimit(3);
+  start({ enabled: true }, { webosVersion: '2.2.3' });
   home.start(function () {
+    noHomeLimit();
     assert.strictEqual(home.enabled(), false);
     assert.ok(tv.events.indexOf('mount') === -1, 'LG\'s Home is not touched');
     assert.ok(!taken());
@@ -1488,42 +1499,33 @@ step('switched on where it is not offered, as after a firmware update to webOS 1
   });
 });
 
-step('webOS 11 is offered, experimental; webOS 12 and later only with allowExperimentalHome', function (done) {
+step('webOS 11 is offered as tried; webOS 12, untried, is offered with the links to report how it went', function (done) {
   start(null, { webosVersion: '11.2.0' });
   home.status(function (st11) {
-    assert.strictEqual(st11.supported.ok, true, 'no setting needed on webOS 11');
+    assert.strictEqual(st11.supported.ok, true);
     assert.strictEqual(st11.supported.experimental, true);
+    assert.strictEqual(st11.supported.untried, undefined);
     start(null, { webosVersion: '12.0.0' });
-    home.status(function (st0) {
-      assert.strictEqual(st0.supported.ok, false, 'untried there, so not offered by default');
-      start(null, { webosVersion: '12.0.0', allowExperimental: function () { return true; } });
-      home.status(function (st) {
-        assert.strictEqual(st.supported.ok, true);
-        assert.strictEqual(st.supported.experimental, true);
-        done();
-      });
+    home.status(function (st) {
+      assert.strictEqual(st.supported.ok, true, 'offered, untried');
+      assert.strictEqual(st.supported.untried, true);
+      assert.ok(/issues\/new/.test(st.supported.report.problem) && /issues\/new/.test(st.supported.report.works));
+      done();
     });
   });
 });
 
-step('webOS 8 is offered only with allowExperimentalHome, using takeover', function (done) {
+step('webOS 8, untried, is offered and uses takeover', function (done) {
   start(null, { webosVersion: '8.3.1' });
-  home.status(function (st0) {
-    assert.strictEqual(st0.supported.ok, false, 'untried there, so not offered by default');
-    home.enable(function (errRes) {
-      assert.strictEqual(errRes.ok, false, 'enable rejected without allowExperimentalHome');
-      start(null, { webosVersion: '8.3.1', allowExperimental: function () { return true; } });
-      home.status(function (st) {
-        assert.strictEqual(st.supported.ok, true);
-        assert.strictEqual(st.supported.experimental, true);
-        assert.strictEqual(st.supported.standalone, undefined, 'uses takeover rather than standalone');
-        done();
-      });
-    });
+  home.status(function (st) {
+    assert.strictEqual(st.supported.ok, true);
+    assert.strictEqual(st.supported.untried, true);
+    assert.strictEqual(st.supported.standalone, undefined, 'uses takeover rather than standalone');
+    done();
   });
 });
 
-step('webOS 5 and 6 are offered, experimental, standalone, without restarting sam; webOS 3 standalone only with allowExperimentalHome', function (done) {
+step('webOS 5 and 6 are offered, experimental, standalone, without restarting sam; webOS 3, untried, standalone', function (done) {
   start(null, { webosVersion: '5.5.0' });
   home.status(function (st5) {
     assert.strictEqual(st5.supported.ok, true, 'no setting needed on a CX');
@@ -1552,15 +1554,12 @@ step('webOS 5 and 6 are offered, experimental, standalone, without restarting sa
             assert.strictEqual(st4.supported.previewOptions, false, 'webOS 4 omits live preview options');
             assert.strictEqual(st4.supported.restartsApps, undefined);
             start(null, { webosVersion: '3.9.3' });
-            home.status(function (st3) {
-              assert.strictEqual(st3.supported.ok, false, 'untried on webOS 3, so not offered by default');
-              start(null, { webosVersion: '3.9.3', allowExperimental: function () { return true; } });
-              home.status(function (st3on) {
-                assert.strictEqual(st3on.supported.ok, true);
-                assert.strictEqual(st3on.supported.standalone, true, 'run as on webOS 4');
-                assert.strictEqual(st3on.supported.previewOptions, false, 'webOS 3 omits live preview options');
-                done();
-              });
+            home.status(function (st3on) {
+              assert.strictEqual(st3on.supported.ok, true, 'offered on webOS 3, untried');
+              assert.strictEqual(st3on.supported.untried, true);
+              assert.strictEqual(st3on.supported.standalone, true, 'run as on webOS 4');
+              assert.strictEqual(st3on.supported.previewOptions, false, 'webOS 3 omits live preview options');
+              done();
             });
           });
         });
@@ -2166,11 +2165,24 @@ step('the default port stages the page at 8080', function (done) {
   });
 });
 
-step('switching on is refused on an untried webOS, changing nothing', function (done) {
-  start(null, { webosVersion: '8.0.0' });
+step('webOS 2, untried, runs it standalone with the Home press read from the remote, as webOS 3', function (done) {
+  start(null, { webosVersion: '2.2.3' });
+  home.status(function (st) {
+    assert.strictEqual(st.supported.ok, true);
+    assert.strictEqual(st.supported.untried, true);
+    assert.strictEqual(st.supported.standalone, true);
+    assert.strictEqual(st.supported.previewOptions, false);
+    done();
+  });
+});
+
+step('switching on is refused where it cannot run, changing nothing', function (done) {
+  homeLimit(3);
+  start(null, { webosVersion: '2.2.3' });
   home.enable(function (r2) {
+    noHomeLimit();
     assert.strictEqual(r2.ok, false);
-    assert.ok(/webOS 8\.0\.0/.test(r2.error));
+    assert.ok(/webOS 3 or later/.test(r2.error), r2.error);
     assert.deepEqual(tv.events, []);
     done();
   });

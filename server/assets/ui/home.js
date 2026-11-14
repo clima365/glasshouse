@@ -434,6 +434,7 @@ function renderHome() {
     !st.bar || !st.bar.offered || !!st.restorePending, !homeWritable() || homeLauncherBusy);
   choice(q('home-mode-launcher'), 'custom', t('home.custom', 'Custom'), customSub, !!chosenId && chosenId !== 'minimal', homeArmed === 'use:own',
     unavailable, !homeWritable() || homeLauncherBusy);
+  renderHomeCompat(st);
   const hist = q('home-history-note');
   if (hist) hist.hidden = st.history;
   renderHomeRows();
@@ -770,6 +771,53 @@ function homeSetPlace(id, place) {
 }
 
 function homeResetLayout() { homeSaveLayout({ reset: true }); }
+
+/*
+ * A launcher not yet reported working on this TV's webOS (lib/compat): offered,
+ * with a note saying so and links to report how it went, pre-filled with the
+ * TV's model and versions. Nothing is sent unless the issue is submitted.
+ */
+// A warning with links to report how it went: `report` is one feature's
+// { problem, works }, or a list of { name, report } where the note covers several.
+function homeCompatNote(text, report) {
+  // Copy details: the same lines the issue opens with, for someone without a
+  // GitHub account to post elsewhere.
+  const links = (r) => `<a href="${esc(r.problem)}" target="_blank" rel="noopener">${esc(t('compat.reportProblem', 'Report a problem'))}</a>
+    &middot; <a href="${esc(r.works)}" target="_blank" rel="noopener">${esc(t('compat.reportWorks', 'Tell us it works'))}</a>${r.details
+    ? ` &middot; <button type="button" class="link-btn" data-details="${esc(r.details)}" onclick="copyCompatDetails(this)">${esc(t('compat.copyDetails', 'Copy details'))}</button>` : ''}`;
+  const rows = Array.isArray(report)
+    ? report.map((x) => `<span class="home-compat-links">${esc(x.name)}: ${links(x.report)}</span>`).join('')
+    : `<span class="home-compat-links">${links(report)}</span>`;
+  return `<div class="pv-note warn home-compat-note">${esc(text)}${rows}</div>`;
+}
+
+async function copyCompatDetails(btn) {
+  const label = t('compat.copyDetails', 'Copy details');
+  try {
+    await copyToClipboard(btn.dataset.details);
+    btn.textContent = t('compat.copied', 'Copied');
+  } catch (e) {
+    btn.textContent = t('compat.copyFailed', 'Could not copy');
+  }
+  setTimeout(() => { btn.textContent = label; }, 2000);
+}
+
+function renderHomeCompat(st) {
+  const box = q('home-compat');
+  if (!box) return;
+  const v = (st.supported && st.supported.webos) || '?';
+  const home = !!(st.supported && st.supported.untried && st.supported.report);
+  const bar = !!(st.bar && st.bar.offered && st.bar.standing === 'untried' && st.bar.report);
+  // One note where both are untried, as on webOS 8, with each one's links.
+  box.innerHTML = home && bar
+    ? homeCompatNote(t('home.compat.untriedBoth', 'Glasshouse Home, Minimal, custom launchers and Glasshouse Bar have not yet been reported working on webOS {version}. If one misbehaves, choose LG Home to put everything back.', { version: v }),
+        [{ name: t('home.title', 'Glasshouse Home'), report: st.supported.report }, { name: t('home.bar.name', 'Glasshouse Bar'), report: st.bar.report }])
+    : home
+    ? homeCompatNote(t('home.compat.untried', 'Glasshouse Home, Minimal and custom launchers have not yet been reported working on webOS {version}. If one misbehaves, choose LG Home to put everything back.', { version: v }), st.supported.report)
+    : bar
+    ? homeCompatNote(t('home.compat.untriedBar', 'Glasshouse Bar has not yet been reported working on webOS {version}. If it misbehaves, choose LG Home to put everything back.', { version: (st.bar.webos || v) }), st.bar.report)
+    : '';
+}
 
 function homeBarOn() { return !!(homeStatus && homeStatus.bar && homeStatus.bar.enabled); }
 
